@@ -1,15 +1,18 @@
 {
-  "name": "google_server",
-  "version": "0.1.0",
+  "name": "@lexwdex-org/google-search-mcp",
+  "version": "0.2.0",
   "description": "MCP server for Google Custom Search API integration",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "google_server": "./dist/index.js"
+    "google-search-mcp": "dist/index.js"
   },
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "build:unix": "tsc && chmod 755 dist/index.js",

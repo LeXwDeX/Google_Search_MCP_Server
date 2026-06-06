@@ -207,6 +207,43 @@ Add `.env` to your `.gitignore` file to protect your credentials:
 echo ".env" >> .gitignore
 ```
 
+#### Optional tuning variables
+
+All of the following are optional and have sensible defaults. They are validated
+at startup — an invalid value causes the server to fail fast with a clear message.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` \| `silent`. Logs go to **stderr** (stdout is reserved for the MCP protocol). |
+| `GOOGLE_SEARCH_TIMEOUT_MS` | `10000` | Per-attempt HTTP timeout. |
+| `GOOGLE_SEARCH_MAX_RETRIES` | `3` | Retries for transient failures (network, 408/425/429/5xx). |
+| `GOOGLE_SEARCH_RETRY_BASE_MS` | `300` | Base delay for exponential backoff. |
+| `GOOGLE_SEARCH_RETRY_MAX_MS` | `8000` | Maximum backoff delay (cap). |
+| `GOOGLE_SEARCH_PER_SECOND` | `5` | Per-second request budget (token bucket; callers wait, not fail). |
+| `GOOGLE_SEARCH_DAILY_LIMIT` | `100` | Hard daily quota (matches free tier). Resets at UTC midnight. |
+| `GOOGLE_SEARCH_RATE_WAIT_MS` | `15000` | Max time a call may wait for a per-second token before erroring. |
+| `GOOGLE_SEARCH_CACHE_TTL_MS` | `300000` | Result cache TTL. `0` disables caching. |
+| `GOOGLE_SEARCH_CACHE_MAX` | `500` | Max cached entries (LRU eviction). `0` disables caching. |
+
+## Reliability & Performance
+
+This server is hardened for production use:
+
+- **Timeouts**: every upstream call is bounded by `AbortController`; no unbounded hangs.
+- **Retries with backoff**: transient errors (network/timeout/408/425/429/5xx) are
+  retried with exponential backoff + full jitter, honoring the server's `Retry-After` header.
+  Non-retryable errors (e.g. 400/403) fail immediately.
+- **TTL + LRU cache**: identical queries are served from memory — faster and **without
+  consuming the daily quota**.
+- **Request coalescing**: concurrent identical queries share a single upstream request.
+- **Waiting rate limiter**: a token bucket smooths bursts by *waiting* instead of failing,
+  with a hard daily quota that fails fast (and clearly) when exhausted.
+- **Input validation & clamping**: arguments are validated with zod and clamped to Google's
+  hard limits (`count` 1-10, `start` 1-91, `start + num ≤ 101`).
+- **Graceful shutdown**: `SIGINT`/`SIGTERM`/transport-close cancel in-flight requests and
+  close cleanly; `uncaughtException`/`unhandledRejection` are guarded.
+- **Structured logging**: JSON lines on stderr with secret redaction.
+
 ## Building Your Server
 
 ### Create the Server Implementation
@@ -551,9 +588,9 @@ Searches for images using Google's Custom Search API.
 
 ## Limitations
 
-- Free tier of Google Custom Search API: 100 queries per day
-- Server-enforced rate limit: 5 requests per second
-- Maximum 10 results per query (Google API limitation)
+- Free tier of Google Custom Search API: 100 queries per day (configurable via `GOOGLE_SEARCH_DAILY_LIMIT`)
+- Default server-enforced rate limit: 5 requests per second (configurable via `GOOGLE_SEARCH_PER_SECOND`)
+- Maximum 10 results per query, and `start + count` must not exceed 101 (Google API limitation)
 
 ## License
 
