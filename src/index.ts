@@ -5,15 +5,14 @@
  * Wires together config, logging, cache, rate limiting, the resilient HTTP
  * client and the search core, exposes two MCP tools, and installs robust
  * lifecycle handling (graceful shutdown, crash guards).
+ *
+ * Served via `serveStdio` (MCP TypeScript SDK v2): the same factory serves
+ * the 2026-07-28 stateless protocol revision and falls back to the 2025-era
+ * handshake for older clients.
  */
 import dotenv from "dotenv";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  type Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -23,6 +22,8 @@ import { HttpClient, HttpError } from "./http.js";
 import { GoogleSearch, InvalidInputError, HttpApiError } from "./google.js";
 
 dotenv.config();
+
+const SERVER_VERSION = "0.3.0";
 
 const WEB_SEARCH_TOOL: Tool = {
   name: "google_web_search",
@@ -84,6 +85,56 @@ function toUserMessage(error: unknown): string {
   return `Error: ${String(error)}`;
 }
 
+interface ServerDeps {
+  logger: ReturnType<typeof createLogger>;
+  search: GoogleSearch;
+  shutdownController: AbortController;
+}
+
+/** Build one MCP server instance. The same instance shape serves both eras. */
+function buildServer({ logger, search, shutdownController }: ServerDeps): Server {
+  const server = new Server(
+    { name: "example-servers/google-search", version: SERVER_VERSION },
+    {
+      capabilities: { tools: {} },
+      // The tool list is static; let 2026-07-28 clients cache it.
+      cacheHints: { "tools/list": { ttlMs: 300_000, cacheScope: "public" } },
+    },
+  );
+
+  server.setRequestHandler("tools/list", async () => ({
+    tools: [WEB_SEARCH_TOOL, IMAGE_SEARCH_TOOL],
+  }));
+
+  server.setRequestHandler("tools/call", async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      switch (name) {
+        case "google_web_search": {
+          const parsed = search.parseWebArgs(args);
+          const text = await search.webSearch(parsed, shutdownController.signal);
+          return { content: [{ type: "text", text }], isError: false };
+        }
+        case "google_image_search": {
+          const parsed = search.parseImageArgs(args);
+          const text = await search.imageSearch(parsed, shutdownController.signal);
+          return { content: [{ type: "text", text }], isError: false };
+        }
+        default:
+          return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+    } catch (error) {
+      logger.error("tool call failed", {
+        tool: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { content: [{ type: "text", text: toUserMessage(error) }], isError: true };
+    }
+  });
+
+  return server;
+}
+
 async function main(): Promise<void> {
   let config;
   try {
@@ -117,44 +168,10 @@ async function main(): Promise<void> {
   }, 60_000);
   pruneTimer.unref?.();
 
-  const server = new Server(
-    { name: "example-servers/google-search", version: "0.2.0" },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [WEB_SEARCH_TOOL, IMAGE_SEARCH_TOOL],
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    try {
-      switch (name) {
-        case "google_web_search": {
-          const parsed = search.parseWebArgs(args);
-          const text = await search.webSearch(parsed, shutdownController.signal);
-          return { content: [{ type: "text", text }], isError: false };
-        }
-        case "google_image_search": {
-          const parsed = search.parseImageArgs(args);
-          const text = await search.imageSearch(parsed, shutdownController.signal);
-          return { content: [{ type: "text", text }], isError: false };
-        }
-        default:
-          return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-      }
-    } catch (error) {
-      logger.error("tool call failed", {
-        tool: name,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return { content: [{ type: "text", text: toUserMessage(error) }], isError: true };
-    }
-  });
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  logger.info("Google Search MCP Server running on stdio", {
+  // Serves the 2026-07-28 revision per connection and answers 2025-era
+  // clients through their initialize handshake on the same factory.
+  const handle = serveStdio(() => buildServer({ logger, search, shutdownController }));
+  logger.info("Google Search MCP Server running on stdio (2026-07-28 + legacy fallback)", {
     perSecondLimit: config.perSecondLimit,
     dailyLimit: config.dailyLimit,
     cacheTtlMs: config.cacheTtlMs,
@@ -169,7 +186,7 @@ async function main(): Promise<void> {
     clearInterval(pruneTimer);
     shutdownController.abort(new Error(`server shutting down: ${reason}`));
     try {
-      await server.close();
+      await handle.close();
     } catch (err) {
       logger.error("error during shutdown", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -178,8 +195,9 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", () => void shutdown("SIGINT", 0));
   process.on("SIGTERM", () => void shutdown("SIGTERM", 0));
-  // stdio transport closing (client disconnect) should end the process.
-  transport.onclose = () => void shutdown("transport closed", 0);
+  // serveStdio owns the transport and overwrites its onclose hook, so watch
+  // stdin directly: EOF means the client disconnected.
+  process.stdin.on("end", () => void shutdown("stdin closed", 0));
 
   process.on("uncaughtException", (err) => {
     logger.error("uncaughtException", { error: err.message, stack: err.stack });

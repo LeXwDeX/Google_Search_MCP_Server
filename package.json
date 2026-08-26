@@ -1,9 +1,12 @@
 {
   "name": "@lexwdex-org/google-search-mcp",
-  "version": "0.2.0",
-  "description": "MCP server for Google Custom Search API integration",
+  "version": "0.3.0",
+  "description": "MCP server (2026-07-28 protocol) for Google Custom Search API integration",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "google-search-mcp": "dist/index.js"
   },
@@ -30,9 +33,9 @@
     "url": "https://github.com/LeXwDeX/google_search_mcp_server/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.10.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "dotenv": "^16.5.0",
-    "zod": "^3.24.3"
+    "zod": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",

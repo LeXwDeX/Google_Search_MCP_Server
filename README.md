@@ -1,6 +1,6 @@
 # Google Search MCP Server
 
-A Model Context Protocol (MCP) server that provides web and image search capabilities through Google's Custom Search API. This server follows the MCP specification to integrate with Claude and other AI assistants.
+A Model Context Protocol (MCP) server that provides web and image search capabilities through Google's Custom Search API. Built on the MCP TypeScript SDK v2, it speaks the **2026-07-28 stateless protocol revision** and automatically falls back to the older initialize-handshake protocol for legacy clients.
 
 <a href="https://glama.ai/mcp/servers/@hunter-arton/google_search_mcp_server">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@hunter-arton/google_search_mcp_server/badge" alt="Google Search Server MCP server" />
@@ -22,10 +22,13 @@ MCP servers provide capabilities to AI assistants. This server implements:
 - **Tools**: Functions that can be called by the AI (with user approval)
 - **Structured Communication**: Standardized messaging format via the MCP protocol
 - **Transport Layer**: Communication via standard input/output
+- **Protocol versions**: serves the 2026-07-28 stateless revision (no handshake; every
+  request carries a `_meta` envelope) and answers 2025-era `initialize` handshakes from
+  the same factory
 
 ## Prerequisites
 
-- Node.js (v18 or higher) and npm
+- Node.js (v20 or higher) and npm
 - Google Cloud Platform account
 - Google Custom Search API key and Search Engine ID
 - An MCP-compatible client (Claude for Desktop, Cursor, VSCode with Claude, etc.)
@@ -62,14 +65,12 @@ GOOGLE_CSE_ID=your_search_engine_id_here
 npm run build
 
 # Test the server (optional)
-# On macOS/Linux
-echo '{"jsonrpc":"2.0","method":"listTools","id":1}' | node dist/index.js
+# The 2026-07-28 revision is stateless — a single self-contained request works
+# with no handshake. (macOS/Linux)
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}' | node dist/index.js
 
 # On Windows PowerShell
-echo '{"jsonrpc":"2.0","method":"listTools","id":1}' | node dist/index.js
-
-# On Windows CMD
-echo {"jsonrpc":"2.0","method":"listTools","id":1} | node dist/index.js
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}' | node dist/index.js
 ```
 
 After building, follow the [Connecting to MCP Clients](#connecting-to-mcp-clients) section to connect the server to your preferred client.
@@ -90,7 +91,7 @@ cd google-search-mcp
 npm init -y
 
 # Install dependencies
-npm install @modelcontextprotocol/sdk dotenv zod
+npm install @modelcontextprotocol/server dotenv zod
 npm install -D @types/node typescript
 
 # Create our files
@@ -108,7 +109,7 @@ cd google-search-mcp
 npm init -y
 
 # Install dependencies
-npm install @modelcontextprotocol/sdk dotenv zod
+npm install @modelcontextprotocol/server dotenv zod
 npm install -D @types/node typescript
 
 # Create our files
@@ -149,6 +150,9 @@ Ensure your `package.json` includes:
   "description": "MCP server for Google Custom Search API integration",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "google_search": "./dist/index.js"
   },
@@ -252,13 +256,8 @@ Create your server implementation in `src/index.ts`:
 
 ```typescript
 import dotenv from "dotenv"
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
 dotenv.config();
 
@@ -279,19 +278,6 @@ const IMAGE_SEARCH_TOOL: Tool = {
   }
 };
 
-// Server implementation
-const server = new Server(
-  {
-    name: "google-search",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
-
 // Check for API key and Search Engine ID
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY!;
 const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID!;
@@ -301,26 +287,40 @@ if (!GOOGLE_API_KEY || !GOOGLE_CSE_ID) {
   process.exit(1);
 }
 
-// Tool handlers
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [WEB_SEARCH_TOOL, IMAGE_SEARCH_TOOL],
-}));
+// Build one server instance. serveStdio pins it per connection and selects
+// the protocol era from the opening exchange (2026-07-28 or legacy handshake).
+function buildServer(): Server {
+  const server = new Server(
+    {
+      name: "google-search",
+      version: "0.3.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    },
+  );
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  // Implement tool handlers
-});
+  server.setRequestHandler("tools/list", async () => ({
+    tools: [WEB_SEARCH_TOOL, IMAGE_SEARCH_TOOL],
+  }));
 
-// Run the server
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Google Search MCP Server running on stdio");
+  server.setRequestHandler("tools/call", async (request) => {
+    // Implement tool handlers
+  });
+
+  return server;
 }
 
-runServer().catch((error) => {
-  console.error("Fatal error running server:", error);
-  process.exit(1);
-});
+// Run the server — serves both protocol eras from the same factory.
+function runServer() {
+  const handle = serveStdio(() => buildServer());
+  console.error("Google Search MCP Server running on stdio");
+  return handle;
+}
+
+runServer();
 ```
 
 For the complete implementation details, see the repository files.
@@ -496,23 +496,43 @@ Claude will automatically use the appropriate search tool when needed.
 
 ### Manual Testing
 
-You can also test your server directly:
+You can also test your server directly. The 2026-07-28 revision is stateless, so a
+single self-contained request works with no handshake:
 
 ```bash
-# Test web search
+# List tools (2026-07-28 envelope, no handshake needed)
 echo '{
   "jsonrpc": "2.0",
-  "method": "callTool",
+  "id": 1,
+  "method": "tools/list",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { "name": "smoke", "version": "1.0" },
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}' | node dist/index.js
+
+# Call a tool (same envelope on every request)
+echo '{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
   "params": {
     "name": "google_web_search",
-    "arguments": {
-      "query": "test query",
-      "count": 2
+    "arguments": { "query": "test query", "count": 2 },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { "name": "smoke", "version": "1.0" },
+      "io.modelcontextprotocol/clientCapabilities": {}
     }
-  },
-  "id": 1
+  }
 }' | node dist/index.js
 ```
+
+Older clients that still speak the 2025-era protocol connect unchanged: they send an
+`initialize` handshake first and the server pins the connection to the legacy era.
 
 ## What's Happening Under the Hood
 
