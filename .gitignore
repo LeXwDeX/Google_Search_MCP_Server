@@ -1,11 +1,6 @@
-# Create .gitignore file
-cat > .gitignore << EOL
-# Build output
-dist/
-build/
-
-# Dependencies
-node_modules/
+# Rust build output
+/target/
+**/*.rs.bk
 
 # Environment variables
 .env
@@ -16,9 +11,7 @@ node_modules/
 
 # Logs
 *.log
-npm-debug.log*
 
 # OS specific
 .DS_Store
 Thumbs.db
-EOL

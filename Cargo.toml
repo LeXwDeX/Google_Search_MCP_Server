@@ -1,0 +1,35 @@
+[package]
+name = "google-search-mcp"
+version = "0.3.1"
+edition = "2021"
+rust-version = "1.88"
+description = "MCP server (2026-07-28 protocol) for Google Custom Search API integration"
+license = "MIT"
+repository = "https://github.com/LeXwDeX/google_search_mcp_server"
+homepage = "https://github.com/LeXwDeX/google_search_mcp_server#readme"
+keywords = ["mcp", "google", "search", "stdio"]
+categories = ["command-line-utilities", "web-programming"]
+
+[lib]
+name = "google_search_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "google-search-mcp"
+path = "src/main.rs"
+
+[dependencies]
+httpdate = "1"
+indexmap = "2"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-std", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,361 +1,215 @@
 # Google Search MCP Server
 
-A Model Context Protocol (MCP) server that provides web and image search capabilities through Google's Custom Search API. Built on the MCP TypeScript SDK v2, it speaks the **2026-07-28 stateless protocol revision** and automatically falls back to the older initialize-handshake protocol for legacy clients.
+A native Rust MCP server that exposes Google Custom Search (web and image) over stdio. It serves the **MCP v2 2026-07-28 stateless protocol revision** and also answers legacy 2025-era `initialize` handshakes on the same connection.
+
+**Binary:** `google-search-mcp` · **Version:** 0.3.1 · **License:** MIT
+
+The protocol is implemented directly in the binary. There is no Node.js runtime, npm package, TypeScript build step, or SDK child process to supervise.
 
 <a href="https://glama.ai/mcp/servers/@hunter-arton/google_search_mcp_server">
   <img width="380" height="200" src="https://glama.ai/mcp/servers/@hunter-arton/google_search_mcp_server/badge" alt="Google Search Server MCP server" />
 </a>
 
-## What We're Building
+## At a glance
 
-Many AI assistants don't have up-to-date information or the ability to search the web. This MCP server solves that problem by providing two tools:
+- **Transport:** newline-delimited JSON-RPC 2.0 on stdin/stdout. stdout is reserved for the protocol.
+- **Logs:** JSON lines on stderr. `LOG_LEVEL` controls verbosity.
+- **Protocol:** 2026-07-28 stateless revision, with automatic legacy `initialize` fallback.
+- **Tools:** `google_web_search` and `google_image_search`.
+- **Install:** download the signed native binary for your platform, set `GOOGLE_API_KEY` and `GOOGLE_CSE_ID`, and point your MCP v2 stdio client at it. No Node.js, npm package, or runtime.
+- **Configuration:** environment variables, optionally loaded from a local `.env`.
 
-- `google_web_search`: Search the web for current information
-- `google_image_search`: Find images related to queries
+## Tools
 
-Once connected to an MCP-compatible client (like Claude in Cursor, VSCode, or Claude Desktop), your AI assistant can perform searches and access current information.
+### `google_web_search`
 
-## Core MCP Concepts
+Performs a Google Custom Search web query and returns formatted text results.
 
-MCP servers provide capabilities to AI assistants. This server implements:
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | Search query. Must be non-empty and at most 2048 characters. |
+| `count` | number | no | `5` | Number of results. Clamped to 1–10. |
+| `start` | number | no | `1` | Pagination start index. Clamped to 1–91. |
+| `site` | string | no | `""` | Restrict results to a domain. Trimmed; at most 255 characters. Appended to the query as `site:<domain>` unless the query already contains `site:`. |
 
-- **Tools**: Functions that can be called by the AI (with user approval)
-- **Structured Communication**: Standardized messaging format via the MCP protocol
-- **Transport Layer**: Communication via standard input/output
-- **Protocol versions**: serves the 2026-07-28 stateless revision (no handshake; every
-  request carries a `_meta` envelope) and answers 2025-era `initialize` handshakes from
-  the same factory
+### `google_image_search`
 
-## Prerequisites
+Searches Google Custom Search for images and returns formatted text results.
 
-- Node.js (v20 or higher) and npm
-- Google Cloud Platform account
-- Google Custom Search API key and Search Engine ID
-- An MCP-compatible client (Claude for Desktop, Cursor, VSCode with Claude, etc.)
+| Parameter | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | Image search query. Must be non-empty and at most 2048 characters. |
+| `count` | number | no | `5` | Number of results. Clamped to 1–10. |
+| `start` | number | no | `1` | Pagination start index. Clamped to 1–91. |
 
-## Quick Start (Clone this Repository)
+### Behavior notes
 
-If you want to use this server without building it from scratch, follow these steps:
+- **Google API hard limits:** `count` cannot exceed 10, `start` cannot exceed 91, and `start + count` cannot exceed 101. If a request exceeds the combined limit, the server reduces `count`.
+- **Argument coercion** matches the previous build: numeric strings such as `"3"` are accepted; missing or non-integer values fall back to the default; out-of-range values are clamped.
+- **`site` applies only to web search.** If the query already contains `site:`, the `site` argument is not appended again.
+- **Results** are returned as one MCP text content block. Web results list a title, description, and URL, with an `About N results.` header when Google provides a total. Image results list a title, description, image URL, and a thumbnail link when available.
+- **Empty result sets** return `No results found for your query.` (web) or `No image results found for your query.` (image).
+- **Tool-level failures** — invalid arguments, quota exhaustion, rate-limit waits, and Google API errors — are returned inside the tool result with `isError: true` and a human-readable message, not as JSON-RPC errors. An unknown tool name returns `Unknown tool: <name>` with `isError: true`.
+
+## Requirements
+
+- Rust 1.88 or newer to build from source, or a signed prebuilt release binary.
+- A Google Cloud project with the Custom Search API enabled.
+- A Google API key and a Programmable Search Engine ID (`cx`).
+- An MCP client that supports stdio servers (Claude Desktop, Cursor, VS Code, or any equivalent client).
+
+No Node.js, npm package, or runtime is required.
+
+## Build and install
+
+Prebuilt binaries are published on the [GitHub Releases](https://github.com/LeXwDeX/google_search_mcp_server/releases) page. The platform assets contain only the native binary; there is no installer, Node.js, npm package, or runtime to set up:
+
+- `google-search-mcp-linux-x86_64.tar.gz` — x86_64 Linux ELF built on Ubuntu 22.04 (glibc 2.35). The archive contains `google-search-mcp`.
+- `google-search-mcp-macos-universal2.zip` — universal2 Mach-O (Apple silicon and Intel), signed with a Developer ID Application certificate (hardened runtime, secure timestamp) and notarized by Apple. The archive contains `google-search-mcp`.
+- `google-search-mcp-windows-x86_64.exe` — x86_64 Windows executable signed with Authenticode.
+
+Every asset is listed in `SHA256SUMS` and has a detached GPG signature; see [Release signing and verification](#release-signing-and-verification).
+
+Download the asset for your platform, extract it if it is an archive, make it executable on Linux or macOS (`chmod +x google-search-mcp`), and use the absolute path to the binary in your MCP client. Configuration comes entirely from environment variables (or a local `.env`), so there is nothing else to install.
+
+Build from source:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/google-search-mcp-server.git
-cd google-search-mcp-server
-
-# Install dependencies
-npm install
-
-# Set up your environment variables
-# Setup .env file in the root folder of the project
-
-# On macOS/Linux
-touch .env
-
-# On Windows
-new-item .env
-
-# Edit .env file to add your Google API credentials
-# Use any text editor you prefer (VS Code, Notepad, nano, vim, etc.)
-# Add these to your newly created .env
-
-GOOGLE_API_KEY=your_api_key_here
-GOOGLE_CSE_ID=your_search_engine_id_here
-
-# Build the server
-npm run build
-
-# Test the server (optional)
-# The 2026-07-28 revision is stateless — a single self-contained request works
-# with no handshake. (macOS/Linux)
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}' | node dist/index.js
-
-# On Windows PowerShell
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}' | node dist/index.js
+git clone https://github.com/LeXwDeX/google_search_mcp_server.git
+cd google_search_mcp_server
+cargo build --locked --release
+# binary: target/release/google-search-mcp
 ```
 
-After building, follow the [Connecting to MCP Clients](#connecting-to-mcp-clients) section to connect the server to your preferred client.
+Or install it into the Cargo bin directory from the repository root:
 
-## Set Up Your Environment (Build from Scratch)
-
-If you prefer to build the server yourself from scratch, follow these instructions:
-
-### Create Project Structure
-
-#### macOS/Linux
 ```bash
-# Create a new directory for our project
-mkdir google-search-mcp
-cd google-search-mcp
-
-# Initialize a new npm project
-npm init -y
-
-# Install dependencies
-npm install @modelcontextprotocol/server dotenv zod
-npm install -D @types/node typescript
-
-# Create our files
-mkdir src
-touch src/index.ts
+cargo install --locked --path .
+# binary: ~/.cargo/bin/google-search-mcp
 ```
 
-#### Windows
+## Release signing and verification
+
+The release workflow publishes signed artifacts only. If a signing secret is missing, the affected job fails with an error instead of uploading an unsigned binary, and the release job verifies every checksum and signature before it publishes the GitHub Release.
+
+| Platform | Asset | Signing |
+| --- | --- | --- |
+| Linux x86_64 | `google-search-mcp-linux-x86_64.tar.gz` | GPG detached signature and `SHA256SUMS` entry |
+| macOS universal2 | `google-search-mcp-macos-universal2.zip` | Developer ID Application signature with hardened runtime and secure timestamp, notarized with Apple `notarytool`, plus a GPG detached signature and `SHA256SUMS` entry |
+| Windows x86_64 | `google-search-mcp-windows-x86_64.exe` | Authenticode signature (SHA-256, RFC 3161 timestamp), plus a GPG detached signature and `SHA256SUMS` entry |
+
+Each release also includes `SHA256SUMS`, `SHA256SUMS.asc`, and a detached `*.asc` signature for every asset.
+
+### Required repository secrets
+
+| Secret | Purpose |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` certificate. |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for that `.p12`. |
+| `APPLE_SIGNING_IDENTITY` | Full `codesign` identity, for example `Developer ID Application: Example Corp (TEAMID)`. |
+| `APPLE_ID` | Apple ID used for notarization. |
+| `APPLE_PASSWORD` | App-specific password for that Apple ID. |
+| `APPLE_TEAM_ID` | Apple Developer team ID. |
+| `WINDOWS_CERTIFICATE` | Base64-encoded Authenticode code-signing `.pfx`. |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password for that `.pfx`. |
+| `GPG_PRIVATE_KEY` | ASCII-armored private key used to sign release assets. |
+| `GPG_PASSPHRASE` | Passphrase for that key; leave empty or unset for an unprotected key. |
+
+### Verify a release
+
+Run these in the directory that contains the downloaded assets. GPG verification requires the release signing public key (imported with `gpg --import`); `spctl` and Gatekeeper may consult Apple's online notarization service, so they need network access.
+
 ```bash
-# Create a new directory for our project
-md google-search-mcp
-cd google-search-mcp
-
-# Initialize a new npm project
-npm init -y
-
-# Install dependencies
-npm install @modelcontextprotocol/server dotenv zod
-npm install -D @types/node typescript
-
-# Create our files
-md src
-new-item src\index.ts
+sha256sum -c SHA256SUMS
+gpg --verify SHA256SUMS.asc SHA256SUMS
+gpg --verify google-search-mcp-linux-x86_64.tar.gz.asc google-search-mcp-linux-x86_64.tar.gz
 ```
 
-### Configure TypeScript
+macOS:
 
-Create a `tsconfig.json` in the root directory:
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
-}
+```bash
+unzip google-search-mcp-macos-universal2.zip
+codesign --verify --strict --verbose=2 google-search-mcp
+spctl --assess --type execute --verbose=4 google-search-mcp
 ```
 
-### Update package.json
+Windows:
 
-Ensure your `package.json` includes:
-
-```json
-{
-  "name": "google_search_mcp",
-  "version": "0.1.0",
-  "description": "MCP server for Google Custom Search API integration",
-  "license": "MIT",
-  "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
-  "bin": {
-    "google_search": "./dist/index.js"
-  },
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build": "tsc",
-    "build:unix": "tsc && chmod 755 dist/index.js",
-    "prepare": "npm run build",
-    "watch": "tsc --watch",
-    "start": "node dist/index.js"
-  }
-}
+```powershell
+signtool verify /pa /v google-search-mcp-windows-x86_64.exe
 ```
 
-## Google API Setup
+## Google Cloud setup
 
-You'll need to set up Google Cloud Platform and get API credentials:
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create or select a project and enable the **Custom Search API** under **APIs & Services → Library**.
+2. Create an **API key** under **APIs & Services → Credentials**.
+3. Create a **Programmable Search Engine** at [programmablesearchengine.google.com](https://programmablesearchengine.google.com/). Choose "Search the entire web" if you want unrestricted results.
+4. Copy the **Search Engine ID** (`cx`) from the engine's control panel.
+5. Provide the key and cx to the server as `GOOGLE_API_KEY` and `GOOGLE_CSE_ID`.
 
-### Google Cloud Platform Setup
+## Configuration
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable the Custom Search API:
-   ```
-   Navigate to "APIs & Services" → "Library"
-   Search for "Custom Search API"
-   Click on "Custom Search API" → "Enable"
-   ```
-4. Create API credentials:
-   ```
-   Navigate to "APIs & Services" → "Credentials"
-   Click "Create Credentials" → "API key"
-   Copy your API key
-   ```
+### Required variables
 
-### Custom Search Engine Setup
+| Variable | Description |
+| --- | --- |
+| `GOOGLE_API_KEY` | Google API key. |
+| `GOOGLE_CSE_ID` | Programmable Search Engine ID (`cx`). |
 
-1. Go to [Programmable Search Engine](https://programmablesearchengine.google.com/)
-2. Click "Add" to create a new search engine
-3. Select "Search the entire web" and name your search engine
-4. Get your Search Engine ID (cx value) from the Control Panel
+The server validates configuration at startup. If a required variable is missing or empty, it prints a per-field message to stderr and exits with code 1 before serving any request. When both are missing:
 
-### Environment Configuration
-
-Create a `.env` file in the root directory:
-
-```
-GOOGLE_API_KEY=your_api_key_here
-GOOGLE_CSE_ID=your_search_engine_id_here
+```text
+Invalid configuration:
+  - googleApiKey: GOOGLE_API_KEY environment variable is required
+  - googleCseId: GOOGLE_CSE_ID environment variable is required
 ```
 
-Add `.env` to your `.gitignore` file to protect your credentials:
-```
-echo ".env" >> .gitignore
-```
-
-#### Optional tuning variables
-
-All of the following are optional and have sensible defaults. They are validated
-at startup — an invalid value causes the server to fail fast with a clear message.
+### Optional tuning variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` \| `silent`. Logs go to **stderr** (stdout is reserved for the MCP protocol). |
-| `GOOGLE_SEARCH_TIMEOUT_MS` | `10000` | Per-attempt HTTP timeout. |
-| `GOOGLE_SEARCH_MAX_RETRIES` | `3` | Retries for transient failures (network, 408/425/429/5xx). |
-| `GOOGLE_SEARCH_RETRY_BASE_MS` | `300` | Base delay for exponential backoff. |
-| `GOOGLE_SEARCH_RETRY_MAX_MS` | `8000` | Maximum backoff delay (cap). |
-| `GOOGLE_SEARCH_PER_SECOND` | `5` | Per-second request budget (token bucket; callers wait, not fail). |
-| `GOOGLE_SEARCH_DAILY_LIMIT` | `100` | Hard daily quota (matches free tier). Resets at UTC midnight. |
-| `GOOGLE_SEARCH_RATE_WAIT_MS` | `15000` | Max time a call may wait for a per-second token before erroring. |
-| `GOOGLE_SEARCH_CACHE_TTL_MS` | `300000` | Result cache TTL. `0` disables caching. |
-| `GOOGLE_SEARCH_CACHE_MAX` | `500` | Max cached entries (LRU eviction). `0` disables caching. |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `silent`. Logs are JSON lines on stderr; stdout is protocol-only. Fields named `key`, `apiKey`, `api_key`, `token`, `authorization`, or `password` are logged as `[redacted]`. |
+| `GOOGLE_SEARCH_TIMEOUT_MS` | `10000` | Per-attempt HTTP timeout in milliseconds (1000–120000). |
+| `GOOGLE_SEARCH_MAX_RETRIES` | `3` | Retries after the first attempt for transient failures: network errors, 408, 425, 429, 500, 502, 503, and 504 (0–8). |
+| `GOOGLE_SEARCH_RETRY_BASE_MS` | `300` | Base delay for exponential backoff with full jitter (10–10000). |
+| `GOOGLE_SEARCH_RETRY_MAX_MS` | `8000` | Maximum backoff delay (100–60000). If lower than the base delay, it is automatically raised to the base delay. |
+| `GOOGLE_SEARCH_PER_SECOND` | `5` | Token-bucket refill rate. Callers wait for a token instead of failing immediately (1–100). |
+| `GOOGLE_SEARCH_DAILY_LIMIT` | `100` | Hard daily quota. When exhausted, calls fail fast. Resets at UTC midnight (1–1000000). |
+| `GOOGLE_SEARCH_RATE_WAIT_MS` | `15000` | Maximum time a call may wait for a per-second token before returning an error (0–120000). |
+| `GOOGLE_SEARCH_CACHE_TTL_MS` | `300000` | Result cache TTL in milliseconds. `0` disables the cache (0–86400000). |
+| `GOOGLE_SEARCH_CACHE_MAX` | `500` | Maximum number of cached entries; least-recently-used entries are evicted. `0` disables the cache (0–100000). |
 
-## Reliability & Performance
+Blank or whitespace-only optional values use their defaults. Invalid values fail fast at startup with a per-field message and exit code 1, for example:
 
-This server is hardened for production use:
-
-- **Timeouts**: every upstream call is bounded by `AbortController`; no unbounded hangs.
-- **Retries with backoff**: transient errors (network/timeout/408/425/429/5xx) are
-  retried with exponential backoff + full jitter, honoring the server's `Retry-After` header.
-  Non-retryable errors (e.g. 400/403) fail immediately.
-- **TTL + LRU cache**: identical queries are served from memory — faster and **without
-  consuming the daily quota**.
-- **Request coalescing**: concurrent identical queries share a single upstream request.
-- **Waiting rate limiter**: a token bucket smooths bursts by *waiting* instead of failing,
-  with a hard daily quota that fails fast (and clearly) when exhausted.
-- **Input validation & clamping**: arguments are validated with zod and clamped to Google's
-  hard limits (`count` 1-10, `start` 1-91, `start + num ≤ 101`).
-- **Graceful shutdown**: `SIGINT`/`SIGTERM`/transport-close cancel in-flight requests and
-  close cleanly; `uncaughtException`/`unhandledRejection` are guarded.
-- **Structured logging**: JSON lines on stderr with secret redaction.
-
-## Building Your Server
-
-### Create the Server Implementation
-
-Create your server implementation in `src/index.ts`:
-
-```typescript
-import dotenv from "dotenv"
-import { Server, type Tool } from "@modelcontextprotocol/server";
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
-
-dotenv.config();
-
-// Define your tools
-const WEB_SEARCH_TOOL: Tool = {
-  name: "google_web_search",
-  description: "Performs a web search using Google's Custom Search API...",
-  inputSchema: {
-    // Schema details here
-  },
-};
-
-const IMAGE_SEARCH_TOOL: Tool = {
-  name: "google_image_search",
-  description: "Searches for images using Google's Custom Search API...",
-  inputSchema: {
-    // Schema details here
-  }
-};
-
-// Check for API key and Search Engine ID
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY!;
-const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID!;
-
-if (!GOOGLE_API_KEY || !GOOGLE_CSE_ID) {
-  console.error("Error: Missing environment variables");
-  process.exit(1);
-}
-
-// Build one server instance. serveStdio pins it per connection and selects
-// the protocol era from the opening exchange (2026-07-28 or legacy handshake).
-function buildServer(): Server {
-  const server = new Server(
-    {
-      name: "google-search",
-      version: "0.3.0",
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    },
-  );
-
-  server.setRequestHandler("tools/list", async () => ({
-    tools: [WEB_SEARCH_TOOL, IMAGE_SEARCH_TOOL],
-  }));
-
-  server.setRequestHandler("tools/call", async (request) => {
-    // Implement tool handlers
-  });
-
-  return server;
-}
-
-// Run the server — serves both protocol eras from the same factory.
-function runServer() {
-  const handle = serveStdio(() => buildServer());
-  console.error("Google Search MCP Server running on stdio");
-  return handle;
-}
-
-runServer();
+```text
+Invalid configuration:
+  - requestTimeoutMs: Invalid input: expected number, received NaN
+  - maxRetries: Too big: expected number to be <=8
+  - logLevel: Invalid option: expected one of "debug"|"info"|"warn"|"error"|"silent"
 ```
 
-For the complete implementation details, see the repository files.
+Configuration errors are printed as plain text because they occur before the structured logger starts. Runtime logs are JSON lines.
 
-### Building the Server
+### `.env` file
 
-After completing your implementation, build the server:
+At startup the binary reads a `.env` file from the working directory only. Variables already present in the process environment are not overridden.
 
-```bash
-npm run build
+```dotenv
+GOOGLE_API_KEY=your_api_key_here
+GOOGLE_CSE_ID=your_search_engine_id_here
 ```
 
-This will compile the TypeScript code to JavaScript in the `dist` directory.
+`.env` is a local convenience for development. Clients that launch the server directly usually pass the same values in their `env` block instead.
 
-## Connecting to MCP Clients
+## Connect an MCP client
 
-MCP servers can be connected to various clients. Here are setup instructions for popular ones:
+All stdio MCP clients need the same three things: the absolute path to the binary, `GOOGLE_API_KEY`, and `GOOGLE_CSE_ID`. There is no runtime or package manager in the launch path; the client starts the binary directly.
 
-### Claude for Desktop
-
-#### macOS/Linux
-1. Open your configuration file:
-```bash
-code ~/Library/Application\ Support/Claude/claude_desktop_config.json
-```
-
-2. Add the server configuration:
 ```json
 {
   "mcpServers": {
     "google_search": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/google-search-mcp/dist/index.js"
-      ],
+      "command": "/absolute/path/to/google-search-mcp",
       "env": {
         "GOOGLE_API_KEY": "your_api_key_here",
         "GOOGLE_CSE_ID": "your_search_engine_id_here"
@@ -365,21 +219,27 @@ code ~/Library/Application\ Support/Claude/claude_desktop_config.json
 }
 ```
 
-#### Windows
-1. Open your configuration file:
-```bash
-code $env:AppData\Claude\claude_desktop_config.json
-```
+Notes:
 
-2. Add the server configuration:
+- Use an **absolute path** in `command`. GUI clients often do not inherit your shell `PATH`; if you installed with `cargo install`, the binary is usually at `~/.cargo/bin/google-search-mcp`.
+- On Windows, escape backslashes: `"command": "C:\\absolute\\path\\to\\google-search-mcp.exe"`.
+- Restart the client after changing its MCP configuration.
+- Do not merge stderr into stdout. stdout is the protocol stream; logs belong on stderr.
+
+Client-specific entry points:
+
+- **Claude Desktop:** `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`; Windows: `%APPDATA%\Claude\`), using the `mcpServers` shape above.
+- **Cursor:** MCP settings (`mcp.json`), using the `mcpServers` shape above.
+- **VS Code:** `.vscode/mcp.json` uses a top-level `servers` object with `type: "stdio"` and the same `command` and `env` fields. Check your VS Code version's schema if it differs.
+
+VS Code example:
+
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "google_search": {
-      "command": "node",
-      "args": [
-        "C:\\absolute\\path\\to\\google-search-mcp\\dist\\index.js"
-      ],
+      "type": "stdio",
+      "command": "/absolute/path/to/google-search-mcp",
       "env": {
         "GOOGLE_API_KEY": "your_api_key_here",
         "GOOGLE_CSE_ID": "your_search_engine_id_here"
@@ -389,229 +249,213 @@ code $env:AppData\Claude\claude_desktop_config.json
 }
 ```
 
-3. Restart Claude for Desktop
-4. Verify the tools appear by clicking the tool icon in the interface
+## Protocol
 
-### VSCode with Claude
+### Transport
 
-#### macOS/Linux & Windows
-1. Install the [MCP Extension for VSCode](https://marketplace.visualstudio.com/items?itemName=anthropic.mcp)
-2. Create or edit `.vscode/settings.json` in your workspace:
+- Requests and responses are **newline-delimited JSON-RPC 2.0** on stdin/stdout. Each message is one JSON object on its own line.
+- stdout is reserved for the protocol. Runtime log lines are JSON written to stderr; startup configuration errors are plain text.
+- Malformed input lines are dropped silently; the server keeps serving.
+- The process exits with code 0 on stdin EOF, `SIGINT`, or `SIGTERM`, and with code 1 on invalid configuration or a fatal startup error. In-flight requests are cancelled during shutdown.
+- A dead stdout or stderr (for example, EPIPE after the client crashes) triggers shutdown instead of leaving an orphaned process.
 
-For macOS/Linux:
+### Modern era: 2026-07-28 stateless revision
+
+There is no handshake. Every modern-era request carries a `_meta` envelope in `params`:
+
 ```json
 {
-  "mcp.servers": {
-    "google_search": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/google-search-mcp/dist/index.js"
-      ],
-      "env": {
-        "GOOGLE_API_KEY": "your_api_key_here",
-        "GOOGLE_CSE_ID": "your_search_engine_id_here"
-      }
-    }
-  }
-}
-```
-
-For Windows:
-```json
-{
-  "mcp.servers": {
-    "google_search": {
-      "command": "node",
-      "args": [
-        "C:\\absolute\\path\\to\\google-search-mcp\\dist\\index.js"
-      ],
-      "env": {
-        "GOOGLE_API_KEY": "your_api_key_here",
-        "GOOGLE_CSE_ID": "your_search_engine_id_here"
-      }
-    }
-  }
-}
-```
-
-3. Restart VSCode
-4. The tools will be available to Claude in VSCode
-
-### Cursor
-
-1. Open Cursor settings (gear icon)
-2. Search for "MCP" and open MCP settings
-3. Click "Add new MCP server"
-4. Configure with similar settings to above:
-
-For macOS/Linux:
-```json
-{
-  "mcpServers": {
-    "google_search": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/google-search-mcp/dist/index.js"
-      ],
-      "env": {
-        "GOOGLE_API_KEY": "your_api_key_here",
-        "GOOGLE_CSE_ID": "your_search_engine_id_here"
-      }
-    }
-  }
-}
-```
-
-For Windows:
-```json
-{
-  "mcpServers": {
-    "google_search": {
-      "command": "node",
-      "args": [
-        "C:\\absolute\\path\\to\\google-search-mcp\\dist\\index.js"
-      ],
-      "env": {
-        "GOOGLE_API_KEY": "your_api_key_here",
-        "GOOGLE_CSE_ID": "your_search_engine_id_here"
-      }
-    }
-  }
-}
-```
-
-5. Restart Cursor
-
-## Testing Your Server
-
-### Using with Claude
-
-Once connected, you can test the tools by asking Claude questions like:
-
-- "Search for the latest news about renewable energy"
-- "Find images of electric vehicles"
-- "What are the top tourist destinations in Japan?"
-
-Claude will automatically use the appropriate search tool when needed.
-
-### Manual Testing
-
-You can also test your server directly. The 2026-07-28 revision is stateless, so a
-single self-contained request works with no handshake:
-
-```bash
-# List tools (2026-07-28 envelope, no handshake needed)
-echo '{
   "jsonrpc": "2.0",
   "id": 1,
   "method": "tools/list",
   "params": {
     "_meta": {
       "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientInfo": { "name": "smoke", "version": "1.0" },
-      "io.modelcontextprotocol/clientCapabilities": {}
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "io.modelcontextprotocol/clientInfo": { "name": "my-client", "version": "1.0" }
     }
   }
-}' | node dist/index.js
-
-# Call a tool (same envelope on every request)
-echo '{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "google_web_search",
-    "arguments": { "query": "test query", "count": 2 },
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientInfo": { "name": "smoke", "version": "1.0" },
-      "io.modelcontextprotocol/clientCapabilities": {}
-    }
-  }
-}' | node dist/index.js
+}
 ```
 
-Older clients that still speak the 2025-era protocol connect unchanged: they send an
-`initialize` handshake first and the server pins the connection to the legacy era.
+- **Required:** `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities`.
+- **Optional:** `io.modelcontextprotocol/clientInfo` and `io.modelcontextprotocol/logLevel`. These are validated when present.
+- Results carry `resultType: "complete"`. Cacheable results also carry `ttlMs` and `cacheScope`, and every result carries `_meta.io.modelcontextprotocol/serverInfo`.
+- `tools/list` returns `ttlMs: 300000` and `cacheScope: "public"`.
+- `server/discover` returns `supportedVersions: ["2026-07-28"]`, `capabilities: {"tools":{}}`, `ttlMs: 0`, and `cacheScope: "private"`.
+- `tools/call` returns `content` blocks, `isError`, `resultType`, and server info in `_meta`.
 
-## What's Happening Under the Hood
+An unsupported version returns JSON-RPC error `-32022` with `data.supported` and `data.requested`. An invalid envelope returns `-32602` with the offending key and problem; a request with no envelope on a modern connection is also rejected with `-32602`.
 
-When you ask a question:
+### Legacy era: 2025-era `initialize`
 
-1. The client sends your question to Claude
-2. Claude analyzes the available tools and decides which to use
-3. The client executes the chosen tool through your MCP server
-4. The results are sent back to Claude
-5. Claude formulates a natural language response based on the search results
-6. The response is displayed to you
+A client that sends `initialize` without a modern envelope gets the legacy handshake. The server echoes the requested protocol version, advertises the `tools` capability, and returns `serverInfo`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {},
+    "clientInfo": { "name": "my-client", "version": "1.0" }
+  }
+}
+```
+
+The legacy era also supports `ping`, `tools/list`, and `tools/call`.
+
+### Method summary
+
+| Era | Requests |
+| --- | --- |
+| Modern (2026-07-28) | `server/discover`, `tools/list`, `tools/call`, `subscriptions/listen` |
+| Legacy (2025-era) | `initialize`, `ping`, `tools/list`, `tools/call` |
+
+The era is selected by the opening exchange. `server/discover` is supported on the modern era; after a `server/discover` probe, the connection can still fall back to a legacy `initialize`. Otherwise, once the modern era is established, requests without the required envelope are rejected with `-32602`, and a legacy `initialize` on that connection is rejected with `-32022`.
+
+`notifications/cancelled` cancels an in-flight `tools/call` by `requestId` in both eras. `subscriptions/listen` is accepted and acknowledged, but this server does not emit list-change notifications. Other notifications are ignored.
+
+Invalid `tools/call` params (for example, a missing `params.name`) produce JSON-RPC errors. Problems inside a valid tool call (invalid search arguments, quota exhaustion, HTTP failures) are returned inside the tool result with `isError: true`.
+
+## Reliability and performance
+
+- **Per-attempt timeouts:** every upstream request is bounded by `GOOGLE_SEARCH_TIMEOUT_MS`.
+- **Retries with backoff:** transient failures are retried with exponential backoff and full jitter, honoring the server's `Retry-After` header (capped by the maximum delay). Non-retryable errors such as 400 or 403 fail immediately.
+- **TTL + LRU cache:** repeated identical queries are served from memory, which is faster and does not consume the local daily quota.
+- **Request coalescing:** identical concurrent queries share one upstream request instead of spending multiple quota units.
+- **Waiting rate limiter + hard quota:** a token bucket smooths bursts by waiting, subject to `GOOGLE_SEARCH_RATE_WAIT_MS`; the daily quota fails fast when exhausted.
+- **Input validation and clamping:** arguments are validated and clamped to Google's limits before any network call.
+- **Graceful shutdown:** `SIGINT`, `SIGTERM`, stdin EOF, and dead stdout/stderr cancel in-flight requests and close the process cleanly.
+- **Structured logging:** JSON lines on stderr with secret redaction.
+- **No runtime boot:** the binary starts the protocol loop directly, with no Node.js process or SDK initialization.
+
+Startup performance is a measured comparison, not a guarantee. In a local macOS measurement of this rewrite, median time to first response was about **3.4 ms**, versus about **148 ms** for the previous Node build — roughly **43× faster**. The measurement covers process startup and first response; it does not include Google API latency.
+
+## Testing and CI
+
+```bash
+cargo test --locked --all-targets
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+`cargo test` runs unit tests inside the modules plus end-to-end tests in `tests/server.rs`. The end-to-end tests spawn the real binary and compare stdout byte-for-byte with fixtures in `tests/fixtures/` captured from the previous TypeScript build. They cover the modern `tools/list` response, a legacy session, unsupported protocol versions, missing client capabilities, invalid tool calls, configuration failures, `.env` loading, clean disconnects, dead stdout/stderr, cancellation, and malformed input.
+
+Workflows (all Cargo commands use `--locked`):
+
+- `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, tests, and a release build on pushes to `main`, on pull requests, and on manual dispatch.
+- `.github/workflows/release.yml` runs the same format, lint, test, and release-build job first. On `v*` tags it then builds the three signed platform assets, verifies that the tag matches the `Cargo.toml` version, generates `SHA256SUMS` and GPG signatures, verifies them, and publishes the GitHub Release. Manual dispatch builds the platform binaries without publishing a release, because the release job is tag-only. A missing signing secret fails the job instead of publishing an unsigned artifact.
+
+## Project layout
+
+| Path | Responsibility |
+| --- | --- |
+| `src/main.rs` | Entry point and lifecycle: config, logger, cache, rate limiter, HTTP client, server run, exit code. |
+| `src/protocol.rs` | MCP wire server: JSON-RPC framing, era selection, method dispatch, tool-call lifecycle, subscriptions, graceful teardown. |
+| `src/google.rs` | Search core: argument validation and clamping, URL building, cache and request coalescing, result formatting. |
+| `src/http.rs` | HTTP client with per-attempt timeouts, retries, backoff, `Retry-After` handling, and cancellation. |
+| `src/rate_limiter.rs` | Per-second token bucket and hard daily quota. |
+| `src/cache.rs` | TTL + LRU result cache. |
+| `src/config.rs` | Environment loading and validation. |
+| `src/dotenv.rs` | `.env` parser matching the previous `dotenv@16.5.0` behavior. |
+| `src/logger.rs` | JSON-lines stderr logger with redaction and dead-output handling. |
+| `src/error.rs` | Error types and user-facing messages. |
+| `src/cancel.rs` | Shutdown and per-request cancellation tokens. |
+| `src/util.rs` | Time, UTF-16 length, and JavaScript-compatible coercion helpers. |
+| `tests/` | End-to-end tests and golden fixtures captured from the TypeScript build. |
+
+## Manual smoke tests
+
+Run these from the repository root after building, with credentials exported. The server exits when stdin closes, so one line of input is enough. Replace `./target/release/google-search-mcp` with `google-search-mcp` if the binary is on your `PATH`.
+
+```bash
+export GOOGLE_API_KEY=your_api_key_here
+export GOOGLE_CSE_ID=your_search_engine_id_here
+```
+
+### Modern `tools/list` — no handshake
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
+  | ./target/release/google-search-mcp
+```
+
+Expected: one JSON line containing both tools, `"resultType":"complete"`, `"ttlMs":300000`, `"cacheScope":"public"`, and server info under `_meta`.
+
+### Legacy `initialize` handshake
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1.0"}}}' \
+  | ./target/release/google-search-mcp
+```
+
+Expected: a result with `"protocolVersion":"2025-06-18"`, `"capabilities":{"tools":{}}`, and `serverInfo`.
+
+### Modern `server/discover`
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' \
+  | ./target/release/google-search-mcp
+```
+
+Expected: a result with `"supportedVersions":["2026-07-28"]`, `"capabilities":{"tools":{}}`, `"resultType":"complete"`, `"ttlMs":0`, and `"cacheScope":"private"`.
+
+## Migration from the Node/npm build
+
+The npm package and Node distribution are replaced by the native binary. This repository no longer publishes to npm; releases contain only signed native binaries for Linux, macOS, and Windows. Download or build `google-search-mcp` instead; there is no `npm install`, no `npm run build`, and no `dist/index.js`.
+
+Unchanged from the previous build:
+
+- Tool names, descriptions, and input schemas.
+- Environment variable names and defaults.
+- Log format and user-facing error messages.
+
+To migrate a client configuration, replace `"command": "node"` and its `args` array with the absolute path to the binary, and keep the `env` block. The end-to-end tests compare wire output byte-for-byte against golden fixtures captured from the TypeScript build, so existing clients should see the same protocol surface.
 
 ## Troubleshooting
 
-### Common Issues
+### The server exits immediately
 
-#### Environment Variables
+Check stderr for a plain-text `Invalid configuration:` message. The most common causes are a missing `GOOGLE_API_KEY` or `GOOGLE_CSE_ID`, a tuning value outside its allowed range, or an invalid `LOG_LEVEL`. The exit code is 1. Verify that `.env` is in the working directory, or that the client passes both variables in its `env` block.
 
-If you see `Error: GOOGLE_API_KEY environment variable is required`:
+### The client shows no tools
 
-```bash
-# Check your .env file
-cat .env
+- Use an absolute path to the binary in `command`.
+- Verify the binary runs and lists tools with the smoke tests above.
+- Make sure the client launches the process with stdin/stdout pipes and keeps stdin open; closing stdin makes the server exit cleanly.
+- Restart the client after editing its MCP configuration.
+- Set `LOG_LEVEL=debug` and inspect stderr for startup and request details.
 
-# Try setting environment variables directly:
-export GOOGLE_API_KEY=your_key_here
-export GOOGLE_CSE_ID=your_id_here
-```
+### Daily quota exhausted
 
-#### API Errors
+The tool result contains a message such as `Daily quota exhausted (100/100). Resets at 2026-11-10T00:00:00.000Z.` The counter is local, in memory, and per process; restarting the server resets it. Raise `GOOGLE_SEARCH_DAILY_LIMIT` only if your Google Cloud quota and billing allow more than the default 100 queries per day.
 
-If you encounter API errors:
+### Rate limit wait exceeded
 
-```bash
-# Test your API credentials directly
-curl "https://www.googleapis.com/customsearch/v1?key=YOUR_API_KEY&cx=YOUR_CX_ID&q=test"
-```
+The tool result contains a message such as `Rate limit wait exceeded 15000ms (per-second limit 5).` The caller waited longer than `GOOGLE_SEARCH_RATE_WAIT_MS` for a per-second token. Raise `GOOGLE_SEARCH_PER_SECOND` or `GOOGLE_SEARCH_RATE_WAIT_MS`, or reduce concurrent demand.
 
-#### Connection Issues
+### Google API errors
 
-If your client can't connect to the server:
+Tool results such as `Google API error 400: ...` or `Google API HTTP 403 ...` indicate a problem upstream. Verify that the API key is valid, the Custom Search API is enabled, the `cx` value is correct, and the search engine is configured to search the web. A direct check:
 
 ```bash
-# Verify the server runs correctly on its own
-node dist/index.js
-
-# Check file permissions
-chmod 755 dist/index.js
-
-# Ensure you're using absolute paths in your configuration
+curl "https://www.googleapis.com/customsearch/v1?key=$GOOGLE_API_KEY&cx=$GOOGLE_CSE_ID&q=test"
 ```
 
-## API Reference
+### Logs interfere with the protocol
 
-### `google_web_search`
-
-Performs a web search using Google's Custom Search API.
-
-**Parameters:**
-- `query` (string, required): The search query
-- `count` (number, optional): Number of results (1-10, default 5)
-- `start` (number, optional): Pagination start index (default 1)
-- `site` (string, optional): Limit search to specific site (e.g., 'example.com')
-
-### `google_image_search`
-
-Searches for images using Google's Custom Search API.
-
-**Parameters:**
-- `query` (string, required): The image search query
-- `count` (number, optional): Number of results (1-10, default 5)
-- `start` (number, optional): Pagination start index (default 1)
+Keep stdout and stderr separate in the client configuration. stdout carries JSON-RPC only; logs are JSON lines on stderr. If a client captures stderr as protocol output, set `LOG_LEVEL=silent`.
 
 ## Limitations
 
-- Free tier of Google Custom Search API: 100 queries per day (configurable via `GOOGLE_SEARCH_DAILY_LIMIT`)
-- Default server-enforced rate limit: 5 requests per second (configurable via `GOOGLE_SEARCH_PER_SECOND`)
-- Maximum 10 results per query, and `start + count` must not exceed 101 (Google API limitation)
+- **Local quota and cache are per process.** The rate limiter, daily-quota counter, and cache live in memory. Restarting the server resets them, and multiple server processes do not share counters. Google's own API quota is separate and still applies.
+- **Google API limits:** at most 10 results per request, `start` at most 91, and `start + count` at most 101.
+- **Only tools are exposed.** The server advertises the `tools` capability; it does not provide prompts or resources.
+- **Text results.** Tool output is formatted text for the model to read, not structured JSON.
+- **API key authentication only.** The server sends `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` to Google; no OAuth flow is implemented.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Licensed under the MIT License.

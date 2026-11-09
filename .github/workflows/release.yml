@@ -1,0 +1,314 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    test:
+        name: Format, lint & test
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Setup Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+
+            - name: Check formatting
+              run: cargo fmt --all -- --check
+
+            - name: Lint
+              run: cargo clippy --locked --all-targets -- -D warnings
+
+            - name: Run tests
+              run: cargo test --locked --all-targets
+
+            - name: Build release binary
+              run: cargo build --locked --release
+
+    linux:
+        name: Linux x86_64
+        runs-on: ubuntu-22.04
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Setup Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+
+            - name: Build release binary
+              run: cargo build --locked --release
+
+            - name: Package
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist
+                  tar -czf dist/google-search-mcp-linux-x86_64.tar.gz \
+                    -C target/release google-search-mcp
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: google-search-mcp-linux-x86_64
+                  path: dist/google-search-mcp-linux-x86_64.tar.gz
+                  if-no-files-found: error
+
+    macos:
+        name: macOS universal2 (signed + notarized)
+        runs-on: macos-15
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Setup Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+
+            - name: Add macOS targets
+              run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+            - name: Build (arm64)
+              run: cargo build --locked --release --target aarch64-apple-darwin
+
+            - name: Build (x86_64)
+              run: cargo build --locked --release --target x86_64-apple-darwin
+
+            - name: Create universal binary
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist
+                  lipo -create \
+                    target/aarch64-apple-darwin/release/google-search-mcp \
+                    target/x86_64-apple-darwin/release/google-search-mcp \
+                    -output dist/google-search-mcp
+                  lipo -info dist/google-search-mcp
+
+            - name: Import Developer ID certificate
+              env:
+                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+                    echo "::error::APPLE_CERTIFICATE secret is required to publish a signed macOS build"
+                    exit 1
+                  fi
+                  KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+                  KEYCHAIN_PASSWORD="$(uuidgen)"
+                  python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+                    <<< "$APPLE_CERTIFICATE" > "$RUNNER_TEMP/certificate.p12"
+                  security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+                  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+                  security import "$RUNNER_TEMP/certificate.p12" \
+                    -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+                  security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+                    -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+            - name: Code sign
+              env:
+                  APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+                    echo "::error::APPLE_SIGNING_IDENTITY secret is required"
+                    exit 1
+                  fi
+                  codesign --force --options runtime --timestamp \
+                    --sign "$APPLE_SIGNING_IDENTITY" dist/google-search-mcp
+                  codesign --verify --strict --verbose=2 dist/google-search-mcp
+                  codesign -dv --verbose=4 dist/google-search-mcp 2>&1
+
+            - name: Notarize
+              env:
+                  APPLE_ID: ${{ secrets.APPLE_ID }}
+                  APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+                  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+                    echo "::error::APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID are required for notarization"
+                    exit 1
+                  fi
+                  ditto -c -k --norsrc dist/google-search-mcp \
+                    dist/google-search-mcp-macos-universal2.zip
+                  xcrun notarytool submit dist/google-search-mcp-macos-universal2.zip \
+                    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+                    --team-id "$APPLE_TEAM_ID" --wait
+                  rm -f dist/google-search-mcp
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: google-search-mcp-macos-universal2
+                  path: dist/google-search-mcp-macos-universal2.zip
+                  if-no-files-found: error
+
+    windows:
+        name: Windows x86_64 (Authenticode)
+        runs-on: windows-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Setup Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo
+              uses: Swatinem/rust-cache@v2
+
+            - name: Build release binary
+              run: cargo build --locked --release
+
+            - name: Sign with Authenticode
+              shell: pwsh
+              env:
+                  WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+                  WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+              run: |
+                  if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE)) {
+                    Write-Error "WINDOWS_CERTIFICATE secret is required to publish a signed Windows build"
+                    exit 1
+                  }
+                  $pfx = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+                  [IO.File]::WriteAllBytes(
+                    $pfx,
+                    [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+                  )
+                  $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+                    -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match '\\x64\\' } |
+                    Sort-Object FullName -Descending |
+                    Select-Object -First 1
+                  if (-not $signtool) {
+                    Write-Error "signtool.exe not found in the Windows SDK"
+                    exit 1
+                  }
+                  & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+                    /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+                    "target\release\google-search-mcp.exe"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  & $signtool.FullName verify /pa /v "target\release\google-search-mcp.exe"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  New-Item -ItemType Directory -Force dist | Out-Null
+                  Copy-Item "target\release\google-search-mcp.exe" `
+                    "dist\google-search-mcp-windows-x86_64.exe"
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: google-search-mcp-windows-x86_64
+                  path: dist/google-search-mcp-windows-x86_64.exe
+                  if-no-files-found: error
+
+    release:
+        name: GPG-sign and publish
+        needs: [test, linux, macos, windows]
+        if: startsWith(github.ref, 'refs/tags/')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Verify tag matches Cargo.toml
+              shell: bash
+              run: |
+                  VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+                  if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+                    echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version v${VERSION}"
+                    exit 1
+                  fi
+
+            - name: Download artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+                  merge-multiple: true
+
+            - name: Verify expected signed artifacts
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  for file in \
+                    artifacts/google-search-mcp-linux-x86_64.tar.gz \
+                    artifacts/google-search-mcp-macos-universal2.zip \
+                    artifacts/google-search-mcp-windows-x86_64.exe; do
+                    test -f "$file" || { echo "::error::missing $file"; exit 1; }
+                  done
+
+            - name: Import GPG signing key
+              env:
+                  GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+                    echo "::error::GPG_PRIVATE_KEY secret is required to publish signed release assets"
+                    exit 1
+                  fi
+                  echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+                  FINGERPRINT=$(gpg --list-secret-keys --with-colons \
+                    | awk -F: '/^fpr:/ {print $10; exit}')
+                  if [ -z "$FINGERPRINT" ]; then
+                    echo "::error::no secret GPG key found after import"
+                    exit 1
+                  fi
+                  echo "GPG_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
+
+            - name: Create checksums and detached signatures
+              env:
+                  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  GPG_ARGS=(--batch --yes --local-user "$GPG_FINGERPRINT" --armor --detach-sign)
+                  if [ -n "${GPG_PASSPHRASE:-}" ]; then
+                    GPG_ARGS+=(--pinentry-mode loopback --passphrase "$GPG_PASSPHRASE")
+                  fi
+                  cd artifacts
+                  sha256sum google-search-mcp-* > SHA256SUMS
+                  for file in google-search-mcp-*; do
+                    case "$file" in *.asc) continue ;; esac
+                    gpg "${GPG_ARGS[@]}" --output "$file.asc" "$file"
+                  done
+                  gpg "${GPG_ARGS[@]}" --output SHA256SUMS.asc SHA256SUMS
+
+            - name: Verify checksums and signatures
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd artifacts
+                  sha256sum -c SHA256SUMS
+                  gpg --batch --verify SHA256SUMS.asc SHA256SUMS
+                  for file in google-search-mcp-*; do
+                    case "$file" in *.asc) continue ;; esac
+                    gpg --batch --verify "$file.asc" "$file"
+                  done
+
+            - name: Publish GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: artifacts/*
+                  generate_release_notes: true
