@@ -16,7 +16,7 @@ The protocol is implemented directly in the binary. There is no Node.js runtime,
 - **Logs:** JSON lines on stderr. `LOG_LEVEL` controls verbosity.
 - **Protocol:** 2026-07-28 stateless revision, with automatic legacy `initialize` fallback.
 - **Tools:** `google_web_search` and `google_image_search`.
-- **Install:** download the signed native binary for your platform, set `GOOGLE_API_KEY` and `GOOGLE_CSE_ID`, and point your MCP v2 stdio client at it. No Node.js, npm package, or runtime.
+- **Install:** download the prebuilt native binary for your platform, set `GOOGLE_API_KEY` and `GOOGLE_CSE_ID`, and point your MCP v2 stdio client at it. No Node.js, npm package, or runtime.
 - **Configuration:** environment variables, optionally loaded from a local `.env`.
 
 ## Tools
@@ -53,7 +53,7 @@ Searches Google Custom Search for images and returns formatted text results.
 
 ## Requirements
 
-- Rust 1.88 or newer to build from source, or a signed prebuilt release binary.
+- Rust 1.88 or newer to build from source, or a prebuilt native release binary.
 - A Google Cloud project with the Custom Search API enabled.
 - A Google API key and a Programmable Search Engine ID (`cx`).
 - An MCP client that supports stdio servers (Claude Desktop, Cursor, VS Code, or any equivalent client).
@@ -65,12 +65,26 @@ No Node.js, npm package, or runtime is required.
 Prebuilt binaries are published on the [GitHub Releases](https://github.com/LeXwDeX/google_search_mcp_server/releases) page. The platform assets contain only the native binary; there is no installer, Node.js, npm package, or runtime to set up:
 
 - `google-search-mcp-linux-x86_64.tar.gz` — x86_64 Linux ELF built on Ubuntu 22.04 (glibc 2.35). The archive contains `google-search-mcp`.
-- `google-search-mcp-macos-universal2.zip` — universal2 Mach-O (Apple silicon and Intel), signed with a Developer ID Application certificate (hardened runtime, secure timestamp) and notarized by Apple. The archive contains `google-search-mcp`.
-- `google-search-mcp-windows-x86_64.exe` — x86_64 Windows executable signed with Authenticode.
+- `google-search-mcp-macos-universal2.zip` — universal2 Mach-O (Apple silicon and Intel), ad-hoc code-signed with `codesign --sign -`. It is not Developer ID signed and not notarized. The archive contains `google-search-mcp`.
+- `google-search-mcp-windows-x86_64.exe` — x86_64 Windows executable, not Authenticode signed.
 
-Every asset is listed in `SHA256SUMS` and has a detached GPG signature; see [Release signing and verification](#release-signing-and-verification).
+Every asset is listed in `SHA256SUMS`, which is signed with Sigstore cosign; see [Release artifacts and verification](#release-artifacts-and-verification).
 
 Download the asset for your platform, extract it if it is an archive, make it executable on Linux or macOS (`chmod +x google-search-mcp`), and use the absolute path to the binary in your MCP client. Configuration comes entirely from environment variables (or a local `.env`), so there is nothing else to install.
+
+To install or update as a normal CLI, download the asset with the GitHub CLI or curl into a user-writable bin directory such as `~/.local/bin`, then point the MCP client at that absolute path. Replacing a binary there is a user-level file operation and needs no admin password:
+
+```bash
+mkdir -p ~/.local/bin /tmp/google-search-mcp
+gh release download --repo LeXwDeX/Google_Search_MCP_Server \
+  --pattern google-search-mcp-linux-x86_64.tar.gz --dir /tmp/google-search-mcp
+tar -xzf /tmp/google-search-mcp/google-search-mcp-linux-x86_64.tar.gz -C ~/.local/bin
+chmod +x ~/.local/bin/google-search-mcp
+```
+
+On macOS, use `--pattern google-search-mcp-macos-universal2.zip` and `unzip` instead of `tar -xzf`. With curl, pass the release asset URL to `curl -L -o` instead of `gh release download`. Terminal downloads generally do not carry the macOS quarantine attribute, so this path usually avoids a Gatekeeper prompt; see [trust caveats](#trust-caveats).
+
+Because the macOS and Windows assets are not signed with a platform-trusted identity, browser-downloaded copies may show a Gatekeeper or SmartScreen warning. See [trust caveats](#trust-caveats); the only way to remove those warnings is a paid Apple Developer ID certificate plus notarization, and an Authenticode certificate, respectively.
 
 Build from source:
 
@@ -88,56 +102,48 @@ cargo install --locked --path .
 # binary: ~/.cargo/bin/google-search-mcp
 ```
 
-## Release signing and verification
+## Release artifacts and verification
 
-The release workflow publishes signed artifacts only. If a signing secret is missing, the affected job fails with an error instead of uploading an unsigned binary, and the release job verifies every checksum and signature before it publishes the GitHub Release.
+Releases on `v*` tags build three native assets on GitHub-hosted runners and publish them with checksums and a Sigstore cosign signature. **No repository secrets are configured or required.** The pipeline runs the format, lint, and test job first, builds the platform assets, verifies that the tag matches the `Cargo.toml` version, combines the assets, and writes `SHA256SUMS`. It then installs cosign v3.1.3 with `sigstore/cosign-installer`, runs `cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS`, verifies the bundle against the workflow identity, and publishes the GitHub Release. Signing is keyless: the workflow uses the GitHub Actions OIDC token, so no signing key or certificate is stored. Manual `workflow_dispatch` runs the build jobs but does not publish a release, because the release job is tag-only.
 
 | Platform | Asset | Signing |
 | --- | --- | --- |
-| Linux x86_64 | `google-search-mcp-linux-x86_64.tar.gz` | GPG detached signature and `SHA256SUMS` entry |
-| macOS universal2 | `google-search-mcp-macos-universal2.zip` | Developer ID Application signature with hardened runtime and secure timestamp, notarized with Apple `notarytool`, plus a GPG detached signature and `SHA256SUMS` entry |
-| Windows x86_64 | `google-search-mcp-windows-x86_64.exe` | Authenticode signature (SHA-256, RFC 3161 timestamp), plus a GPG detached signature and `SHA256SUMS` entry |
+| Linux x86_64 | `google-search-mcp-linux-x86_64.tar.gz` | None (not OS-code-signed) |
+| macOS universal2 | `google-search-mcp-macos-universal2.zip` | Ad-hoc `codesign --sign -`; not Developer ID signed, not notarized |
+| Windows x86_64 | `google-search-mcp-windows-x86_64.exe` | None (not Authenticode-signed) |
 
-Each release also includes `SHA256SUMS`, `SHA256SUMS.asc`, and a detached `*.asc` signature for every asset.
-
-### Required repository secrets
-
-| Secret | Purpose |
-| --- | --- |
-| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` certificate. |
-| `APPLE_CERTIFICATE_PASSWORD` | Password for that `.p12`. |
-| `APPLE_SIGNING_IDENTITY` | Full `codesign` identity, for example `Developer ID Application: Example Corp (TEAMID)`. |
-| `APPLE_ID` | Apple ID used for notarization. |
-| `APPLE_PASSWORD` | App-specific password for that Apple ID. |
-| `APPLE_TEAM_ID` | Apple Developer team ID. |
-| `WINDOWS_CERTIFICATE` | Base64-encoded Authenticode code-signing `.pfx`. |
-| `WINDOWS_CERTIFICATE_PASSWORD` | Password for that `.pfx`. |
-| `GPG_PRIVATE_KEY` | ASCII-armored private key used to sign release assets. |
-| `GPG_PASSPHRASE` | Passphrase for that key; leave empty or unset for an unprotected key. |
+Each release also includes `SHA256SUMS` with the SHA-256 checksum of all three assets, plus the `SHA256SUMS.sigstore.json` cosign signature bundle.
 
 ### Verify a release
 
-Run these in the directory that contains the downloaded assets. GPG verification requires the release signing public key (imported with `gpg --import`); `spctl` and Gatekeeper may consult Apple's online notarization service, so they need network access.
+Run these in the directory that contains the downloaded assets, with [cosign](https://docs.sigstore.dev/cosign/installation/) v3.x installed:
 
 ```bash
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/LeXwDeX/Google_Search_MCP_Server/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
 sha256sum -c SHA256SUMS
-gpg --verify SHA256SUMS.asc SHA256SUMS
-gpg --verify google-search-mcp-linux-x86_64.tar.gz.asc google-search-mcp-linux-x86_64.tar.gz
 ```
 
-macOS:
+The cosign signature covers `SHA256SUMS`, which in turn lists the SHA-256 hash of each platform asset. Verifying the manifest and then checking it against the downloaded files ties all three assets to the release workflow and tag; if a file was altered, `sha256sum -c` fails.
+
+macOS — after unzipping, check the ad-hoc signature:
 
 ```bash
 unzip google-search-mcp-macos-universal2.zip
 codesign --verify --strict --verbose=2 google-search-mcp
-spctl --assess --type execute --verbose=4 google-search-mcp
 ```
 
-Windows:
+An ad-hoc signature is expected; this verifies that the binary was not modified after signing, not that Apple trusts the publisher.
 
-```powershell
-signtool verify /pa /v google-search-mcp-windows-x86_64.exe
-```
+### Trust caveats
+
+- **macOS:** ad-hoc signing plus a terminal download (`gh release download` or `curl`) into a user-writable directory such as `~/.local/bin` installs and updates the CLI without an admin password; that is a normal CLI replacement, not an OS trust decision. Browser downloads can carry the `com.apple.quarantine` attribute, which is what can trigger a Gatekeeper warning; terminal downloads generally do not. If a browser-downloaded copy is blocked, `xattr -d com.apple.quarantine google-search-mcp` clears the local quarantine flag for that file, but the only trusted fix for arbitrary Macs is a paid Apple Developer ID certificate plus notarization. This release is not Developer ID signed and not notarized.
+- **Windows:** the binaries are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+- **Linux:** assets are not OS-code-signed.
+- **Sigstore signature:** the cosign signature over `SHA256SUMS` (keyless, issued through GitHub Actions OIDC) proves which workflow, commit, and tag produced the manifest. It is not OS-level code signing and does not change how Gatekeeper, SmartScreen, or Linux package tooling treats the binaries.
 
 ## Google Cloud setup
 
@@ -346,7 +352,7 @@ cargo clippy --locked --all-targets -- -D warnings
 Workflows (all Cargo commands use `--locked`):
 
 - `.github/workflows/ci.yml` runs formatting, Clippy with warnings denied, tests, and a release build on pushes to `main`, on pull requests, and on manual dispatch.
-- `.github/workflows/release.yml` runs the same format, lint, test, and release-build job first. On `v*` tags it then builds the three signed platform assets, verifies that the tag matches the `Cargo.toml` version, generates `SHA256SUMS` and GPG signatures, verifies them, and publishes the GitHub Release. Manual dispatch builds the platform binaries without publishing a release, because the release job is tag-only. A missing signing secret fails the job instead of publishing an unsigned artifact.
+- `.github/workflows/release.yml` runs the same format, lint, test, and release-build job first. On `v*` tags three build jobs produce the Linux x86_64 archive, the ad-hoc-signed macOS universal2 archive, and the unsigned Windows executable; the release job then verifies that the tag matches the `Cargo.toml` version, collects the three assets, writes `SHA256SUMS`, signs it with Sigstore cosign in keyless OIDC mode, verifies the signature against the workflow identity, and publishes the GitHub Release. Manual dispatch builds the platform binaries without publishing a release, because the release job is tag-only. No repository secrets are used.
 
 ## Project layout
 
@@ -404,7 +410,7 @@ Expected: a result with `"supportedVersions":["2026-07-28"]`, `"capabilities":{"
 
 ## Migration from the Node/npm build
 
-The npm package and Node distribution are replaced by the native binary. This repository no longer publishes to npm; releases contain only signed native binaries for Linux, macOS, and Windows. Download or build `google-search-mcp` instead; there is no `npm install`, no `npm run build`, and no `dist/index.js`.
+The npm package and Node distribution are replaced by the native binary. This repository no longer publishes to npm; releases contain only prebuilt native binaries for Linux, macOS, and Windows. Download or build `google-search-mcp` instead; there is no `npm install`, no `npm run build`, and no `dist/index.js`.
 
 Unchanged from the previous build:
 
